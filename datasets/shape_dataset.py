@@ -73,6 +73,7 @@ class ShapeDataset(Dataset):
         The shape type is determined by idx % 3
         Position and size are determined pseudo-randomly based on idx
         """
+        random.seed(idx)  # Ensure reproducibility for each index
         # Select shape type based on index
         shape_type = self.shape_types[idx % len(self.shape_types)]
         
@@ -102,12 +103,45 @@ class ShapeDataset(Dataset):
         return img, meta
 
 
-if __name__ == "__main__":
-    # Example usage
-    dataset = ShapeDataset()
-    img_tensor, metadata = dataset[0]
-    
-    # Save example image
-    img = Image.fromarray((img_tensor[0].numpy() * 255).astype(np.uint8))
-    img.save("example_shape.png")
-    print(f"Generated {metadata['shape_type']} at position {metadata['position']} with size {metadata['size']}")
+    def interpolate(self, idx1, idx2, alpha, interpolation_type="parameter"):
+        """
+        Interpolate between two shapes based on their indices.
+        
+        Args:
+            idx1 (int): Index of the first shape
+            idx2 (int): Index of the second shape
+            alpha (float): Interpolation factor between 0 and 1
+                         0 = first shape
+                         1 = second shape
+            interpolation_type (str): Type of interpolation to perform ("pixel" or "parameter")
+        Returns:
+            interpolated_image
+        """
+        # Get the two shapes
+        img1, meta1 = self.__getitem__(idx1)
+        img2, meta2 = self.__getitem__(idx2)
+        
+        if interpolation_type == "pixel":
+            # Pixel-space interpolation (direct blend)
+            pixel_interp = img1 * (1 - alpha) + img2 * alpha
+            return pixel_interp
+
+        # Parameter-space interpolation
+        interp_size = int(meta1['size'] * (1 - alpha) + meta2['size'] * alpha)
+        interp_pos = meta1['position'] * (1 - alpha) + meta2['position'] * alpha
+        
+        # For shape type, we'll use the source shape for alpha < 0.5, target shape for alpha >= 0.5
+        interp_shape_type = meta1['shape_type'] if alpha < 0.5 else meta2['shape_type']
+        shape_type = self.shape_types[interp_shape_type]
+        
+        # Draw the interpolated shape
+        param_interp_img = self.draw_shape(
+            shape_type, 
+            int(interp_pos[0].item()), 
+            int(interp_pos[1].item()), 
+            interp_size
+        )
+        param_interp_img = torch.from_numpy(np.array(param_interp_img)).float() / 255.0
+        param_interp_img = einops.repeat(param_interp_img, 'h w -> c h w', c=3)
+
+        return param_interp_img
