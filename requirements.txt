@@ -4,3 +4,16 @@ torch
 torchvision
 matplotlib
 einops
+tqdm
+timm
+transformers
+huggingface-hub
+
+# For inference
+Pillow
+scipy
+diffusers
+
+# Optional but recommended for better performance
+# xformers
+# triton
