@@ -1,9 +1,14 @@
 name: latentwalk
 channels:
   - conda-forge
+  - pytorch
   - defaults
 dependencies:
   - python=3.9
   - numpy
   - pillow
+  - pytorch
+  - torchvision
+  - matplotlib
+  - einops
   - pip
