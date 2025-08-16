@@ -1,7 +1,7 @@
-import torch
 from torch.utils.data import DataLoader
-from datasets.shape_dataset import ShapeDataset
 import matplotlib.pyplot as plt
+
+from datasets.shape_dataset import ShapeDataset
 
 def main():
     # Create dataset
@@ -12,7 +12,6 @@ def main():
     
     # Get a batch of images
     images, metadata = next(iter(dataloader))
-    breakpoint()  # Debugging point to inspect images and metadata
     # Plot the images
     fig, axes = plt.subplots(2, 2, figsize=(8, 8))
     axes = axes.ravel()
