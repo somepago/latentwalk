@@ -14,7 +14,7 @@ import PIL
 from models.diffusion_model import Sana_600M
 from models.diffusion_utils import FlowMatchingScheduler, DPMSolver
 from models.dino import ModelWithIntermediateLayers
-from models.projector import Projector
+from models.projector import Projector, CrossAttentionProjector
 # Text encoder imports
 from transformers import AutoTokenizer, AutoModelForCausalLM, T5Tokenizer, T5EncoderModel
 from torchvision import transforms
@@ -129,7 +129,7 @@ def encode_image_prompt(image_prompts: List[PIL.Image.Image], device: torch.devi
     dino_model = ModelWithIntermediateLayers()
     dino_model.eval()
     dino_model.to(device)
-    projector = Projector()
+    projector = CrossAttentionProjector() #Projector()
     projector.eval()
     projector.to(device)
     with torch.no_grad():
