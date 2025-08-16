@@ -19,6 +19,7 @@ class ModelWithIntermediateLayers(nn.Module):
 
 if __name__ == "__main__":
     model = ModelWithIntermediateLayers()
-    images = torch.randn(1, 3, 224, 224)  # Example input
+    images = torch.randn(10, 3, 224, 224)  # Example input
     features = model(images)
-    print(features.shape)
+    print(features.shape) # torch.Size([10, 256, 384])
+

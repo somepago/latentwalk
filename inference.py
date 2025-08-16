@@ -10,13 +10,14 @@ import argparse
 from pathlib import Path
 from typing import List, Optional, Union, Dict, Tuple
 import os
-
+import PIL
 from models.diffusion_model import Sana_600M
 from models.diffusion_utils import FlowMatchingScheduler, DPMSolver
-
+from models.dino import ModelWithIntermediateLayers
+from models.projector import Projector
 # Text encoder imports
 from transformers import AutoTokenizer, AutoModelForCausalLM, T5Tokenizer, T5EncoderModel
-
+from torchvision import transforms
 # VAE imports
 try:
     from diffusers import AutoencoderDC
@@ -26,6 +27,22 @@ except ImportError:
     print("Install with: pip install diffusers")
     VAE_AVAILABLE = False
 
+def process_image_prompts(image_prompts: Union[str, List[str]]) -> List[PIL.Image.Image]:    
+    if isinstance(image_prompts, str):
+        image_prompts = [image_prompts]
+
+
+    transform = transforms.Compose([
+        transforms.Resize((224, 224)),  # Resize to target dimensions
+        transforms.ToTensor(),  # Convert to tensor [0, 1] range
+        transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])  # Normalize to [-1, 1] range
+    ])
+    
+    # Load and transform the image
+    image_prompts = [Image.open(image_prompt).convert('RGB') for image_prompt in image_prompts]
+    image_prompts = torch.stack([transform(image_prompt) for image_prompt in image_prompts])
+
+    return image_prompts
 
 
 def get_tokenizer_and_text_encoder(name="gemma-2-2b-it", device="cuda"):
@@ -104,6 +121,22 @@ def encode_prompt(
         attention_mask = text_inputs.attention_mask[:, select_index]
 
     return text_embeddings, attention_mask
+
+def encode_image_prompt(image_prompts: List[PIL.Image.Image], device: torch.device) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    Encode image prompts using the text encoder.
+    """
+    dino_model = ModelWithIntermediateLayers()
+    dino_model.eval()
+    dino_model.to(device)
+    projector = Projector()
+    projector.eval()
+    projector.to(device)
+    with torch.no_grad():
+        image_features = dino_model(image_prompts) # torch.Size([num_images, 256, 384])
+        image_features, mask = projector(image_features) # torch.Size([num_images, 1, 300, 2304]), torch.Size([num_images, 300])
+
+    return image_features, mask
 
 
 def load_vae(device="cuda", dtype=torch.float16):
@@ -232,7 +265,8 @@ def load_model(
 @torch.no_grad()
 def generate_images(
     model: Sana_600M,
-    prompts: Union[str, List[str]],
+    prompts: Union[str, List[str], None],
+    image_prompts: Union[torch.Tensor, None],
     tokenizer,
     text_encoder,
     vae=None,
@@ -264,20 +298,27 @@ def generate_images(
     Returns:
         List of generated images
     """
-    # Handle single prompt
-    if isinstance(prompts, str):
-        prompts = [prompts]
+    # TODO: deal with combination of text and image prompts later. currently if image_prompts is not None, prompts is ignored
 
-    batch_size = len(prompts) * num_images_per_prompt
+    if image_prompts is not None:
+        prompts = None 
+    if prompts is not None:
+        if isinstance(prompts, str):
+            prompts = [prompts]
+        batch_size = len(prompts) * num_images_per_prompt
 
-    # Encode prompts with the real text encoder
-    text_embeddings, attention_mask = encode_prompt(
-        tokenizer=tokenizer,
-        text_encoder=text_encoder,
-        prompt=prompts * num_images_per_prompt, # prompts are interleaved by number of instances btw
-        max_sequence_length=max_sequence_length,
-        device=device,
-    ) # shapes for len(prompts) = 2, num_images_per_prompt = 3 - text_embeddings:[ 6, 1, 300, 2304 ], attention_mask: [6, 300]
+        # Encode prompts with the real text encoder
+        prompt_embeddings, prompt_attention_mask = encode_prompt(
+            tokenizer=tokenizer,
+            text_encoder=text_encoder,
+            prompt=prompts * num_images_per_prompt, # prompts are interleaved by number of instances btw
+            max_sequence_length=max_sequence_length,
+            device=device,
+        ) # shapes for len(prompts) = 2, num_images_per_prompt = 3 - text_embeddings:[ 6, 1, 300, 2304 ], attention_mask: [6, 300]
+    if image_prompts is not None:
+        # Encode image prompts with the real text encoder
+        prompt_embeddings, prompt_attention_mask = encode_image_prompt(image_prompts, device)
+        batch_size = len(image_prompts)
 
     # Create null embeddings (empty string)
     null_text_embeddings, null_attention_mask = encode_prompt(
@@ -305,8 +346,8 @@ def generate_images(
     # Generate latents
     print(f"Generating {batch_size} images...")
     latents = sampler.sample(
-        text_embeddings=text_embeddings,
-        attention_mask=attention_mask,
+        text_embeddings=prompt_embeddings,
+        attention_mask=prompt_attention_mask,
         null_embeddings=null_text_embeddings,
         height=height,
         width=width,
@@ -338,7 +379,8 @@ def main():
         default=["A beautiful landscape with mountains and trees"],
         help="Text prompt(s) for generation. Provide a single prompt or multiple prompts separated by spaces. For multi-word prompts, enclose each in quotes."
     )
-    parser.add_argument("--num_images", type=int, default=4, help="Number of images to generate")
+    parser.add_argument("--image_prompts", type=str, default=None, help="Path to image prompts")
+    parser.add_argument("--num_images_per_prompt", type=int, default=1, help="Number of images to generate")
     parser.add_argument("--height", type=int, default=32, help="Latent height")
     parser.add_argument("--width", type=int, default=32, help="Latent width")
     parser.add_argument("--steps", type=int, default=20, help="Number of inference steps")
@@ -383,10 +425,17 @@ def main():
     # Set random seed
     generator = torch.Generator(device=device).manual_seed(args.seed)
 
+    if args.image_prompts is not None:
+        image_prompts = process_image_prompts(args.image_prompts)
+
+    else:
+        image_prompts = None
+
     # Generate images
     images = generate_images(
         model=model,
         prompts=args.prompt,
+        image_prompts=image_prompts,
         tokenizer=tokenizer,
         text_encoder=text_encoder,
         vae=vae,
@@ -394,7 +443,7 @@ def main():
         guidance_scale=args.guidance_scale,
         height=args.height,
         width=args.width,
-        num_images_per_prompt=args.num_images,
+        num_images_per_prompt=args.num_images_per_prompt,
         generator=generator,
         device=device,
         flow_shift=args.flow_shift,
