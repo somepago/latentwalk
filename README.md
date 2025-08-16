@@ -13,4 +13,11 @@ Todos
 - Training pipeline with loss 
 - Reward model + metrics  
   
+## Test
 
+```
+uv pip install -e .
+
+python tests/test_shapes.py
+python tests/test_shapes.py
+```
