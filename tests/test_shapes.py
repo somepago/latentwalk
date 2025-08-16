@@ -5,8 +5,8 @@ from datasets.shape_dataset import ShapeDataset
 
 def main():
     # Create dataset
-    dataset = ShapeDataset(num_samples=100)
-    
+    dataset = ShapeDataset(num_samples=100, image_size=224, min_size=32, max_size=128)
+
     # Create dataloader
     dataloader = DataLoader(dataset, batch_size=4)
     

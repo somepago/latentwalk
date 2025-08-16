@@ -4,6 +4,7 @@ from torch.utils.data import Dataset
 from PIL import Image, ImageDraw
 import random
 import einops
+from torchvision import transforms
 
 
 class ShapeDataset(Dataset):
@@ -25,7 +26,10 @@ class ShapeDataset(Dataset):
 
         # Define shape sizes
         self.shape_sizes = np.arange(min_size, max_size + 1)
-        
+
+        # Normalize
+        self.transform = transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
+
     def create_blank_image(self):
         """Create a black background image."""
         return Image.new('L', (self.image_size, self.image_size), color=0)
@@ -76,22 +80,23 @@ class ShapeDataset(Dataset):
         random.seed(idx)  # Ensure reproducibility for each index
         # Select shape type based on index
         shape_type = self.shape_types[idx % len(self.shape_types)]
-        
+
         # Generate random position ensuring shape fits in image
         size = self.shape_sizes[idx % len(self.shape_sizes)]
 
         margin = size + 1  # Add margin to ensure shape doesn't touch edges
         x = random.randint(margin, self.image_size - margin)
         y = random.randint(margin, self.image_size - margin)
-        
+
         # Draw the shape
         img = self.draw_shape(shape_type, x, y, size)
-        
+
         # Convert to tensor
         img = torch.from_numpy(np.array(img)).float() / 255.0
 
         # Repeat channel dimension to fake RGB
         img = einops.repeat(img, 'h w -> c h w', c=3)
+        img = self.transform(img)
 
         # Create metadata dict
         meta = {

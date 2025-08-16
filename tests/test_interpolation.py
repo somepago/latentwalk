@@ -50,8 +50,8 @@ def plot_interpolation_grid(dataset, idx1, idx2, alphas):
 
 def main():
     # Create dataset
-    dataset = ShapeDataset()
-    
+    dataset = ShapeDataset(num_samples=100, image_size=224, min_size=32, max_size=128)
+
     # Set random seeds for reproducibility
     torch.manual_seed(42)
     np.random.seed(42)
@@ -66,15 +66,15 @@ def main():
         (1, 4),  # triangle to triangle
         (2, 5)   # circle to circle   
     ]
-    
+
     for pair_idx, (idx1, idx2) in enumerate(shape_pairs):
         # Create interpolation grid
         fig = plot_interpolation_grid(dataset, idx1, idx2, alphas)
-        
+
         # Save the figure
         fig.savefig(f'interpolation_grid_{pair_idx}.png', dpi=150, bbox_inches='tight')
         plt.close(fig)
-        
+
         print(f"Generated interpolation grid for shape pair {pair_idx}")
 
 
