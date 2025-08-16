@@ -1,0 +1,9 @@
+name: latentwalk
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.9
+  - numpy
+  - pillow
+  - pip
