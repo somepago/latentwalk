@@ -274,10 +274,10 @@ def generate_images(
     text_embeddings, attention_mask = encode_prompt(
         tokenizer=tokenizer,
         text_encoder=text_encoder,
-        prompt=prompts * num_images_per_prompt,
+        prompt=prompts * num_images_per_prompt, # prompts are interleaved by number of instances btw
         max_sequence_length=max_sequence_length,
         device=device,
-    ) # shapes for len(prompts) = 1, num_images_per_prompt = 1 - text_embeddings:[ 1, 1, 300, 2304 ], attention_mask: [1, 300]
+    ) # shapes for len(prompts) = 2, num_images_per_prompt = 3 - text_embeddings:[ 6, 1, 300, 2304 ], attention_mask: [6, 300]
 
     # Create null embeddings (empty string)
     null_text_embeddings, null_attention_mask = encode_prompt(
@@ -286,7 +286,7 @@ def generate_images(
         prompt=[""] * batch_size,
         max_sequence_length=max_sequence_length,
         device=device,
-    )
+    ) # same size as text_embeddings except mask is all 0s except for the first 1
 
     # Create scheduler and sampler
     scheduler = FlowMatchingScheduler(
@@ -331,8 +331,13 @@ def main():
                         help="Text encoder to use (e.g., gemma-2-2b-it, T5-xl)")
 
     # Generation arguments
-    parser.add_argument("--prompt", type=str, default="A beautiful landscape with mountains and trees",
-                        help="Text prompt for generation")
+    parser.add_argument(
+        "--prompt",
+        type=str,
+        nargs="+",
+        default=["A beautiful landscape with mountains and trees"],
+        help="Text prompt(s) for generation. Provide a single prompt or multiple prompts separated by spaces. For multi-word prompts, enclose each in quotes."
+    )
     parser.add_argument("--num_images", type=int, default=4, help="Number of images to generate")
     parser.add_argument("--height", type=int, default=32, help="Latent height")
     parser.add_argument("--width", type=int, default=32, help="Latent width")
