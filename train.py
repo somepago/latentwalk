@@ -139,7 +139,7 @@ def plot_loss_curves(log_file_path, save_dir, plot_interval=100):
     
     print(f"Loss plots saved to: {plots_dir}")
 
-def generate_sample_images(model, vae, dino_model, projector, device, save_dir, epoch, num_samples=4):
+def generate_sample_images(model, vae, dino_model, projector, device, save_dir, iteration, num_samples=4):
     """
     Generate sample images using the current model state.
     """
@@ -212,8 +212,8 @@ def generate_sample_images(model, vae, dino_model, projector, device, save_dir, 
     
     # Save images
     os.makedirs(os.path.join(save_dir, 'samples'), exist_ok=True)
-    for i, img in enumerate(pil_images):
-        img.save(os.path.join(save_dir, 'samples', f'epoch_{epoch}_sample_{i}.png'))
+    # for i, img in enumerate(pil_images):
+    #     img.save(os.path.join(save_dir, 'samples', f'epoch_{epoch}_sample_{i}.png'))
     
     # Create a grid visualization
     fig, axes = plt.subplots(2, num_samples, figsize=(num_samples * 3, 6))
@@ -232,10 +232,10 @@ def generate_sample_images(model, vae, dino_model, projector, device, save_dir, 
         axes[1, i].axis('off')
     
     plt.tight_layout()
-    plt.savefig(os.path.join(save_dir, 'samples', f'epoch_{epoch}_comparison.png'), dpi=150, bbox_inches='tight')
+    plt.savefig(os.path.join(save_dir, 'samples', f'iter_{iteration}_comparison.png'), dpi=150, bbox_inches='tight')
     plt.close()
     
-    print(f"Generated sample images for epoch {epoch}")
+    print(f"Generated sample images for iteration {iteration}")
     model.train()
 
 def train(
@@ -252,6 +252,7 @@ def train(
     plot_interval=100,
     train_type='projector',
     pretrained_sana_path=None,
+    gradient_accumulation_steps=1,
 ):
     """
     Train the SANA model on shape dataset.
@@ -267,6 +268,7 @@ def train(
         projector_type (str): Type of projector to use (linear or crossattention)
         train_type (str): Type of params to train (projector or both)
         pretrained_sana_path (str): Path to pre-trained SANA model for projector-only training
+        gradient_accumulation_steps (int): Number of steps to accumulate gradients before updating
     """
     # Create save directory
     os.makedirs(save_dir, exist_ok=True)
@@ -333,8 +335,8 @@ def train(
             print(f"First few unexpected keys: {unexpected_keys[:5]}...")
             
         print("Pre-trained SANA model loaded successfully")
-    elif train_type == 'projector' and pretrained_sana_path is None:
-        print("Warning: Training projector-only without pre-trained SANA model. This may not work well.")
+    else:
+        print("‼️⚠️ Warning: SANA weights not found, initializing from scratch")
 
     # Initialize optimizers
     projector_optimizer = AdamW(projector.parameters(), lr=learning_rate)
@@ -403,61 +405,76 @@ def train(
 
                 # Calculate loss
                 loss = nn.MSELoss()(pred, targets)
+                
+                # Scale loss for gradient accumulation
+                loss = loss / gradient_accumulation_steps
 
                 # Backpropagation
-                projector_optimizer.zero_grad()
-                if sana_optimizer is not None:
-                    sana_optimizer.zero_grad()
                 loss.backward()
-                projector_optimizer.step()
-                if sana_optimizer is not None:
-                    sana_optimizer.step()
 
-                # Log loss per iteration
-                iteration = epoch * len(dataloader) + batch_idx + 1
-                loss_logger.log_loss(iteration, epoch + 1, loss.item())
+                # Update weights every gradient_accumulation_steps
+                if (batch_idx + 1) % gradient_accumulation_steps == 0:
+                    projector_optimizer.step()
+                    projector_optimizer.zero_grad()
+                    if sana_optimizer is not None:
+                        sana_optimizer.step()
+                        sana_optimizer.zero_grad()
+
+                # Log loss per iteration (only count as iteration when we actually update)
+                if (batch_idx + 1) % gradient_accumulation_steps == 0:
+                    iteration = epoch * (len(dataloader) // gradient_accumulation_steps) + (batch_idx // gradient_accumulation_steps) + 1
+                    loss_logger.log_loss(iteration, epoch + 1, loss.item() * gradient_accumulation_steps)  # Scale back for logging
+
+                    # Generate sample images based on iteration count
+                    if iteration % sample_interval == 0:
+                        print(f"\nGenerating sample images for iteration {iteration}...")
+                        generate_sample_images(sana_model, vae, dino_model, projector, device, save_dir, f'iter_{iteration}')
+
+                    # Save checkpoints based on iteration count
+                    if iteration % save_interval == 0:
+                        checkpoint_path = os.path.join(save_dir, f'checkpoint_iter_{iteration}.pt')
+                        print(f"\nSaving checkpoint to {checkpoint_path}")
+                        checkpoint_data = {
+                            'iteration': iteration,
+                            'epoch': epoch,
+                            'projector_state_dict': projector.state_dict(),
+                            'sana_state_dict': sana_model.state_dict(),
+                            'projector_optimizer_state_dict': projector_optimizer.state_dict(),
+                            'loss': total_loss / num_batches,
+                            'config': {
+                                'batch_size': batch_size,
+                                'learning_rate': learning_rate,
+                                'num_epochs': num_epochs,
+                                'num_samples': num_samples,
+                                'use_vae': vae is not None,
+                                'in_channels': in_channels,
+                                'gradient_accumulation_steps': gradient_accumulation_steps
+                            }
+                        }
+                        
+                        # Only save SANA optimizer state if it exists
+                        if sana_optimizer is not None:
+                            checkpoint_data['sana_optimizer_state_dict'] = sana_optimizer.state_dict()
+                        
+                        torch.save(checkpoint_data, checkpoint_path)
 
                 # Update progress bar
-                total_loss += loss.item()
+                total_loss += loss.item() * gradient_accumulation_steps  # Scale back for display
                 pbar.set_postfix({"loss": total_loss / (batch_idx + 1)})
-
-        # Save checkpoints
-        if (epoch + 1) % save_interval == 0:
-            checkpoint_path = os.path.join(save_dir, f'checkpoint_epoch_{epoch+1}.pt')
-            print(f"\nSaving checkpoint to {checkpoint_path}")
-            torch.save({
-                'epoch': epoch,
-                'projector_state_dict': projector.state_dict(),
-                'sana_state_dict': sana_model.state_dict(),
-                'projector_optimizer_state_dict': projector_optimizer.state_dict(),
-                'sana_optimizer_state_dict': sana_optimizer.state_dict(),
-                'loss': total_loss / num_batches,
-                'config': {
-                    'batch_size': batch_size,
-                    'learning_rate': learning_rate,
-                    'num_epochs': num_epochs,
-                    'num_samples': num_samples,
-                    'use_vae': vae is not None,
-                    'in_channels': in_channels
-                }
-            }, checkpoint_path)
             
 
         
-        # Generate sample images (independent of checkpoint saving)
-        if (epoch + 1) % sample_interval == 0:
-            print(f"Generating sample images for epoch {epoch + 1}...")
-            generate_sample_images(sana_model, vae, dino_model, projector, device, save_dir, epoch + 1)
+
     
     # Save final checkpoint
     final_checkpoint_path = os.path.join(save_dir, f'checkpoint_final.pt')
     print(f"\nSaving final checkpoint to {final_checkpoint_path}")
-    torch.save({
+    
+    final_checkpoint_data = {
         'epoch': num_epochs - 1,
         'projector_state_dict': projector.state_dict(),
         'sana_state_dict': sana_model.state_dict(),
         'projector_optimizer_state_dict': projector_optimizer.state_dict(),
-        'sana_optimizer_state_dict': sana_optimizer.state_dict(),
         'loss': total_loss / num_batches,
         'config': {
             'batch_size': batch_size,
@@ -465,9 +482,16 @@ def train(
             'num_epochs': num_epochs,
             'num_samples': num_samples,
             'use_vae': vae is not None,
-            'in_channels': in_channels
+            'in_channels': in_channels,
+            'gradient_accumulation_steps': gradient_accumulation_steps
         }
-    }, final_checkpoint_path)
+    }
+    
+    # Only save SANA optimizer state if it exists
+    if sana_optimizer is not None:
+        final_checkpoint_data['sana_optimizer_state_dict'] = sana_optimizer.state_dict()
+    
+    torch.save(final_checkpoint_data, final_checkpoint_path)
     
     # Generate final sample images
     print("Generating final sample images...")
@@ -495,12 +519,12 @@ if __name__ == "__main__":
                         help='device to use for training (default: cuda if available, else cpu)')
     parser.add_argument('--num-samples', type=int, default=100000,
                         help='number of samples in the training dataset (default: 100000)')
-    parser.add_argument('--save-interval', type=int, default=10,
-                        help='save checkpoint every N epochs (default: 10)')
+    parser.add_argument('--save-interval', type=int, default=1000,
+                        help='save checkpoint every N iterations (default: 1000)')
     parser.add_argument('--num-workers', type=int, default=4,
                         help='number of workers for data loading (default: 4)')
-    parser.add_argument('--sample-interval', type=int, default=10,
-                        help='generate sample images every N epochs (default: 10)')
+    parser.add_argument('--sample-interval', type=int, default=100,
+                        help='generate sample images every N iterations (default: 100)')
     # projector type
     parser.add_argument('--projector-type', type=str, default='linear', choices=['linear', 'crossattention'],
                         help='type of projector to use (default: linear)')
@@ -514,8 +538,11 @@ if __name__ == "__main__":
     parser.add_argument('--run-name', type=str, default=None,
                         help='name of the run (default: run)')
     # pretrained SANA model path for projector-only training
-    parser.add_argument('--pretrained-sana-path', type=str, default=None,
+    parser.add_argument('--pretrained-sana-path', type=str, default="checkpoints/sana_600m.pt",
                         help='path to pre-trained SANA model for projector-only training')
+    # gradient accumulation
+    parser.add_argument('--gradient-accumulation-steps', type=int, default=1,
+                        help='number of steps to accumulate gradients before updating (default: 1)')
 
 
     args = parser.parse_args()
@@ -536,5 +563,6 @@ if __name__ == "__main__":
         projector_type=args.projector_type,
         train_type=args.train_type,
         plot_interval=args.plot_interval,
-        pretrained_sana_path=args.pretrained_sana_path
+        pretrained_sana_path=args.pretrained_sana_path,
+        gradient_accumulation_steps=args.gradient_accumulation_steps
     )
