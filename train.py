@@ -273,11 +273,11 @@ def train(
                     'in_channels': in_channels
                 }
             }, checkpoint_path)
-            
-            # Generate sample images
-            if (epoch + 1) % sample_interval == 0:
-                print(f"Generating sample images for epoch {epoch + 1}...")
-                generate_sample_images(sana_model, vae, dino_model, projector, device, save_dir, epoch + 1)
+        
+        # Generate sample images (independent of checkpoint saving)
+        if (epoch + 1) % sample_interval == 0:
+            print(f"Generating sample images for epoch {epoch + 1}...")
+            generate_sample_images(sana_model, vae, dino_model, projector, device, save_dir, epoch + 1)
     
     # Save final checkpoint
     final_checkpoint_path = os.path.join(save_dir, f'checkpoint_final.pt')
