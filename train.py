@@ -8,16 +8,136 @@ from torch.utils.data import DataLoader
 from torch.optim import AdamW
 from tqdm import tqdm
 import os
+import json
+from datetime import datetime
 
 from datasets.shape_dataset import ShapeDataset
 from models.dino import ModelWithIntermediateLayers
-from models.projector import Projector
+from models.projector import Projector, CrossAttentionProjector
 from models.diffusion_model import Sana_600M
 from models.diffusion_utils import FlowMatchingScheduler, DPMSolver
 from models.vae_utils import load_vae, vae_encode, vae_decode
 import matplotlib.pyplot as plt
 import numpy as np
 from PIL import Image
+
+class LossLogger:
+    """Logger for tracking training loss per iteration."""
+    
+    def __init__(self, log_file_path):
+        self.log_file_path = log_file_path
+        self.losses = []
+        self.iterations = []
+        self.epochs = []
+        
+        # Create log file and write header
+        with open(self.log_file_path, 'w') as f:
+            f.write("iteration,epoch,loss\n")
+    
+    def log_loss(self, iteration, epoch, loss):
+        """Log a single loss value."""
+        self.iterations.append(iteration)
+        self.epochs.append(epoch)
+        self.losses.append(loss)
+        
+        # Write to file immediately
+        with open(self.log_file_path, 'a') as f:
+            f.write(f"{iteration},{epoch},{loss:.6f}\n")
+    
+    def get_recent_losses(self, num_points=100):
+        """Get the most recent loss values for plotting."""
+        if len(self.losses) <= num_points:
+            return self.iterations, self.losses
+        else:
+            return self.iterations[-num_points:], self.losses[-num_points:]
+
+def plot_loss_curves(log_file_path, save_dir, plot_interval=100):
+    """
+    Plot loss curves from the logged data and save as images.
+    
+    Args:
+        log_file_path (str): Path to the loss log file
+        save_dir (str): Directory to save the plots
+        plot_interval (int): How often to save plots (every N iterations)
+    """
+    if not os.path.exists(log_file_path):
+        print(f"Loss log file not found: {log_file_path}")
+        return
+    
+    # Read the log file
+    iterations = []
+    epochs = []
+    losses = []
+    
+    with open(log_file_path, 'r') as f:
+        # Skip header
+        next(f)
+        for line in f:
+            if line.strip():
+                iter_num, epoch, loss = line.strip().split(',')
+                iterations.append(int(iter_num))
+                epochs.append(int(epoch))
+                losses.append(float(loss))
+    
+    if not losses:
+        print("No loss data found in log file")
+        return
+    
+    # Create plots directory
+    plots_dir = os.path.join(save_dir, 'loss_plots')
+    os.makedirs(plots_dir, exist_ok=True)
+    
+    # Plot 1: Loss vs Iteration (full training)
+    plt.figure(figsize=(12, 6))
+    plt.plot(iterations, losses, 'b-', alpha=0.7, linewidth=1)
+    plt.xlabel('Iteration')
+    plt.ylabel('Loss')
+    plt.title('Training Loss vs Iteration')
+    plt.grid(True, alpha=0.3)
+    plt.yscale('log')  # Log scale for better visualization
+    plt.tight_layout()
+    plt.savefig(os.path.join(plots_dir, 'loss_vs_iteration.png'), dpi=150, bbox_inches='tight')
+    plt.close()
+    
+    # Plot 2: Loss vs Iteration (recent window)
+    if len(losses) > plot_interval:
+        recent_iterations = iterations[-plot_interval:]
+        recent_losses = losses[-plot_interval:]
+        
+        plt.figure(figsize=(12, 6))
+        plt.plot(recent_iterations, recent_losses, 'r-', alpha=0.8, linewidth=1.5)
+        plt.xlabel('Iteration')
+        plt.ylabel('Loss')
+        plt.title(f'Training Loss vs Iteration (Last {plot_interval} iterations)')
+        plt.grid(True, alpha=0.3)
+        plt.yscale('log')
+        plt.tight_layout()
+        plt.savefig(os.path.join(plots_dir, 'loss_vs_iteration_recent.png'), dpi=150, bbox_inches='tight')
+        plt.close()
+    
+    # Plot 3: Average Loss per Epoch
+    epoch_losses = {}
+    for epoch, loss in zip(epochs, losses):
+        if epoch not in epoch_losses:
+            epoch_losses[epoch] = []
+        epoch_losses[epoch].append(loss)
+    
+    avg_epoch_losses = {epoch: np.mean(losses) for epoch, losses in epoch_losses.items()}
+    epoch_numbers = sorted(avg_epoch_losses.keys())
+    avg_losses = [avg_epoch_losses[epoch] for epoch in epoch_numbers]
+    
+    plt.figure(figsize=(10, 6))
+    plt.plot(epoch_numbers, avg_losses, 'g-', marker='o', markersize=4, linewidth=2)
+    plt.xlabel('Epoch')
+    plt.ylabel('Average Loss')
+    plt.title('Average Loss per Epoch')
+    plt.grid(True, alpha=0.3)
+    plt.yscale('log')
+    plt.tight_layout()
+    plt.savefig(os.path.join(plots_dir, 'avg_loss_per_epoch.png'), dpi=150, bbox_inches='tight')
+    plt.close()
+    
+    print(f"Loss plots saved to: {plots_dir}")
 
 def generate_sample_images(model, vae, dino_model, projector, device, save_dir, epoch, num_samples=4):
     """
@@ -128,6 +248,10 @@ def train(
     save_interval=10,
     num_workers=4,
     sample_interval=10,
+    projector_type='linear',
+    plot_interval=100,
+    train_type='projector',
+    pretrained_sana_path=None,
 ):
     """
     Train the SANA model on shape dataset.
@@ -140,10 +264,19 @@ def train(
         device (str): Device to use for training ('cuda' or 'cpu')
         num_samples (int): Number of samples in the training dataset
         save_interval (int): Save checkpoint every N epochs
+        projector_type (str): Type of projector to use (linear or crossattention)
+        train_type (str): Type of params to train (projector or both)
+        pretrained_sana_path (str): Path to pre-trained SANA model for projector-only training
     """
     # Create save directory
     os.makedirs(save_dir, exist_ok=True)
     print(f"Save directory: {os.path.abspath(save_dir)}")
+
+    # Initialize loss logger
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_file_path = os.path.join(save_dir, f'loss_log_{timestamp}.txt')
+    loss_logger = LossLogger(log_file_path)
+    print(f"Loss logging to: {log_file_path}")
 
     # Initialize dataset and dataloader
     # SANA needs 1024x1024 images, DINO needs multiples of 14 (224x224 is good)
@@ -165,22 +298,51 @@ def train(
         in_channels = 32  # DC-AE VAE uses 32 channels
         model_dtype = torch.float32  # Use float32 for stability
 
-    projector = Projector().to(device, dtype=model_dtype)
+    if projector_type == 'linear':
+        projector = Projector().to(device, dtype=model_dtype)
+    elif projector_type == 'crossattention':
+        projector = CrossAttentionProjector().to(device, dtype=model_dtype)
+    else:
+        raise ValueError(f"Invalid projector type: {projector_type}")
     
-    sana_model = Sana_600M(
-        in_channels=in_channels,
-        hidden_size=768,
-        patch_size=16,
-        depth=12,
-        num_heads=12,
-        mlp_ratio=4,
-        qk_norm=True,
-        y_norm=True,
-    ).to(device, dtype=model_dtype)
+    sana_model = Sana_600M().to(device, dtype=model_dtype)
+
+    # Load pre-trained SANA model if specified
+    if pretrained_sana_path is not None and os.path.exists(pretrained_sana_path):
+        print(f"Loading pre-trained SANA model from {pretrained_sana_path}")
+        checkpoint = torch.load(pretrained_sana_path, map_location=device)
+        
+        # Handle different checkpoint formats like in inference.py
+        if "state_dict" in checkpoint:
+            state_dict = checkpoint["state_dict"]
+        elif "sana_state_dict" in checkpoint:
+            state_dict = checkpoint["sana_state_dict"]
+        elif "model_state_dict" in checkpoint:
+            state_dict = checkpoint["model_state_dict"]
+        else:
+            state_dict = checkpoint
+        
+        # Load state dict with strict=False to handle missing/unexpected keys
+        missing_keys, unexpected_keys = sana_model.load_state_dict(state_dict, strict=False)
+        
+        if missing_keys:
+            print(f"Warning: Missing keys in checkpoint: {len(missing_keys)} keys")
+            print(f"First few missing keys: {missing_keys[:5]}...")
+        if unexpected_keys:
+            print(f"Warning: Unexpected keys in checkpoint: {len(unexpected_keys)} keys")
+            print(f"First few unexpected keys: {unexpected_keys[:5]}...")
+            
+        print("Pre-trained SANA model loaded successfully")
+    elif train_type == 'projector' and pretrained_sana_path is None:
+        print("Warning: Training projector-only without pre-trained SANA model. This may not work well.")
 
     # Initialize optimizers
     projector_optimizer = AdamW(projector.parameters(), lr=learning_rate)
-    sana_optimizer = AdamW(sana_model.parameters(), lr=learning_rate)
+    if train_type == 'both':
+        sana_optimizer = AdamW(sana_model.parameters(), lr=learning_rate)
+    else:
+        sana_model.requires_grad_(False)
+        sana_optimizer = None
 
     # Initialize scheduler
     flow_scheduler = FlowMatchingScheduler()
@@ -244,10 +406,16 @@ def train(
 
                 # Backpropagation
                 projector_optimizer.zero_grad()
-                sana_optimizer.zero_grad()
+                if sana_optimizer is not None:
+                    sana_optimizer.zero_grad()
                 loss.backward()
                 projector_optimizer.step()
-                sana_optimizer.step()
+                if sana_optimizer is not None:
+                    sana_optimizer.step()
+
+                # Log loss per iteration
+                iteration = epoch * len(dataloader) + batch_idx + 1
+                loss_logger.log_loss(iteration, epoch + 1, loss.item())
 
                 # Update progress bar
                 total_loss += loss.item()
@@ -273,6 +441,8 @@ def train(
                     'in_channels': in_channels
                 }
             }, checkpoint_path)
+            
+
         
         # Generate sample images (independent of checkpoint saving)
         if (epoch + 1) % sample_interval == 0:
@@ -302,6 +472,12 @@ def train(
     # Generate final sample images
     print("Generating final sample images...")
     generate_sample_images(sana_model, vae, dino_model, projector, device, save_dir, 'final')
+    
+    # Generate final loss plots
+    print("Generating final loss plots...")
+    plot_loss_curves(log_file_path, save_dir, plot_interval)
+    
+    print(f"Training completed! Loss log saved to: {log_file_path}")
 
 if __name__ == "__main__":
     import argparse
@@ -325,8 +501,27 @@ if __name__ == "__main__":
                         help='number of workers for data loading (default: 4)')
     parser.add_argument('--sample-interval', type=int, default=10,
                         help='generate sample images every N epochs (default: 10)')
+    # projector type
+    parser.add_argument('--projector-type', type=str, default='linear', choices=['linear', 'crossattention'],
+                        help='type of projector to use (default: linear)')
+    # which params to train - projector only or projector and sana
+    parser.add_argument('--train-type', type=str, default='projector', choices=['projector', 'both'],
+                        help='type of params to train (default: projector)')
+    # loss plot interval
+    parser.add_argument('--plot-interval', type=int, default=100,
+                        help='number of iterations to include in recent loss plot (default: 100)')
+    # give the run a name
+    parser.add_argument('--run-name', type=str, default=None,
+                        help='name of the run (default: run)')
+    # pretrained SANA model path for projector-only training
+    parser.add_argument('--pretrained-sana-path', type=str, default=None,
+                        help='path to pre-trained SANA model for projector-only training')
+
 
     args = parser.parse_args()
+    args.save_dir = os.path.join(args.save_dir, args.projector_type, args.train_type)
+    if args.run_name is not None:
+        args.save_dir = os.path.join(args.save_dir, args.run_name)
     
     train(
         batch_size=args.batch_size,
@@ -337,5 +532,9 @@ if __name__ == "__main__":
         num_samples=args.num_samples,
         save_interval=args.save_interval,
         num_workers=args.num_workers,
-        sample_interval=args.sample_interval
+        sample_interval=args.sample_interval,
+        projector_type=args.projector_type,
+        train_type=args.train_type,
+        plot_interval=args.plot_interval,
+        pretrained_sana_path=args.pretrained_sana_path
     )
