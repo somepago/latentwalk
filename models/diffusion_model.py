@@ -534,10 +534,38 @@ class PatchEmbedMS(nn.Module):
         self.norm = norm_layer(embed_dim) if norm_layer else nn.Identity()
 
     def forward(self, x):
+        # Debug: Check input to patch embedding
+        if torch.isnan(x).any():
+            print(f"NaN detected in patch embedding input")
+            print(f"Input stats: min={x.min().item()}, max={x.max().item()}, mean={x.mean().item()}")
+        
+        # Debug: Check convolution weights
+        if torch.isnan(self.proj.weight).any():
+            print(f"NaN detected in patch embedding convolution weights")
+            print(f"Weight stats: min={self.proj.weight.min().item()}, max={self.proj.weight.max().item()}, mean={self.proj.weight.mean().item()}")
+        
         x = self.proj(x)
+        
+        # Debug: Check after convolution
+        if torch.isnan(x).any():
+            print(f"NaN detected after patch embedding convolution")
+            print(f"Conv output stats: min={x.min().item()}, max={x.max().item()}, mean={x.mean().item()}")
+        
         if self.flatten:
             x = x.flatten(2).transpose(1, 2)  # BCHW -> BNC
+            
+            # Debug: Check after flatten
+            if torch.isnan(x).any():
+                print(f"NaN detected after patch embedding flatten")
+                print(f"Flatten output stats: min={x.min().item()}, max={x.max().item()}, mean={x.mean().item()}")
+        
         x = self.norm(x)
+        
+        # Debug: Check after normalization
+        if torch.isnan(x).any():
+            print(f"NaN detected after patch embedding normalization")
+            print(f"Norm output stats: min={x.min().item()}, max={x.max().item()}, mean={x.mean().item()}")
+        
         return x
 
 
@@ -839,6 +867,7 @@ class Sana_600M(nn.Module):
         p = self.patch_size
         h = self.h
         w = self.w
+        # Debug info removed for clean output
         assert h * w == x.shape[1]
 
         x = x.reshape(shape=(x.shape[0], h, w, p, p, c))
@@ -858,11 +887,32 @@ class Sana_600M(nn.Module):
         timestep = timestep.to(self.dtype)
         y = y.to(self.dtype)
 
+        # Debug: Check input values
+        if torch.isnan(x).any():
+            print(f"NaN detected in input x")
+        if torch.isnan(timestep).any():
+            print(f"NaN detected in timestep")
+        if torch.isnan(y).any():
+            print(f"NaN detected in input y")
+
         # Store HW for unpatchify
         self.h, self.w = x.shape[-2] // self.patch_size, x.shape[-1] // self.patch_size
 
+        # Debug: Check input before patch embedding
+        if torch.isnan(x).any():
+            print(f"NaN detected in input before patch embedding")
+            print(f"Input stats: min={x.min().item()}, max={x.max().item()}, mean={x.mean().item()}")
+        
         # Patch embedding
         x = self.x_embedder(x)  # (N, T, D)
+        
+        # Debug: Check after patch embedding
+        if torch.isnan(x).any():
+            print(f"NaN detected after patch embedding")
+            print(f"Patch embedding output stats: min={x.min().item()}, max={x.max().item()}, mean={x.mean().item()}")
+            # Return a tensor with the correct output shape instead of the intermediate shape
+            # Use the original input dimensions for the output shape
+            return torch.full((x.shape[0], self.out_channels, self.h * self.patch_size, self.w * self.patch_size), float('nan'), device=x.device, dtype=x.dtype)
 
         # Add positional embedding
         if self.use_pe:
@@ -886,7 +936,20 @@ class Sana_600M(nn.Module):
 
         # Time embedding
         t = self.t_embedder(timestep.to(x.dtype))  # (N, D)
+        
+        # Debug: Check time embedding
+        if torch.isnan(t).any():
+            print(f"NaN detected in time embedding")
+            # Return a tensor with the correct output shape instead of the intermediate shape
+            return torch.full((x.shape[0], self.out_channels, self.h * self.patch_size, self.w * self.patch_size), float('nan'), device=x.device, dtype=x.dtype)
+            
         t0 = self.t_block(t)  # (N, 6*D)
+        
+        # Debug: Check t0
+        if torch.isnan(t0).any():
+            print(f"NaN detected in t0")
+            # Return a tensor with the correct output shape instead of the intermediate shape
+            return torch.full((x.shape[0], self.out_channels, self.h * self.patch_size, self.w * self.patch_size), float('nan'), device=x.device, dtype=x.dtype)
 
         # Caption embedding
         # Handle different input shapes for y
@@ -922,14 +985,17 @@ class Sana_600M(nn.Module):
 
         # Final layer
         x = self.final_layer(x, t)  # (N, T, patch_size**2 * out_channels)
-
+        # Debug info removed for clean output
+        
         # Unpatchify
         x = self.unpatchify(x)  # (N, out_channels, H, W)
+        # Debug info removed for clean output
 
         # Split learned variance if applicable
         if self.pred_sigma:
             x, _ = torch.split(x, self.in_channels, dim=1)
 
+        # Debug info removed for clean output
         return x
 
     def forward_with_dpmsolver(self, x, timestep, y, mask=None, **kwargs):
@@ -960,4 +1026,4 @@ if __name__ == "__main__":
 
     with torch.no_grad():
         output = model(x, timestep, y, mask)
-        print(f"Output shape: {output.shape}")
+        # Debug info removed for clean output

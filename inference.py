@@ -15,17 +15,10 @@ from models.diffusion_model import Sana_600M
 from models.diffusion_utils import FlowMatchingScheduler, DPMSolver
 from models.dino import ModelWithIntermediateLayers
 from models.projector import Projector, CrossAttentionProjector
+from models.vae_utils import load_vae, vae_decode
 # Text encoder imports
 from transformers import AutoTokenizer, AutoModelForCausalLM, T5Tokenizer, T5EncoderModel
 from torchvision import transforms
-# VAE imports
-try:
-    from diffusers import AutoencoderDC
-    VAE_AVAILABLE = True
-except ImportError:
-    print("Warning: diffusers not installed. VAE decoding will not be available.")
-    print("Install with: pip install diffusers")
-    VAE_AVAILABLE = False
 
 def process_image_prompts(image_prompts: Union[str, List[str]]) -> List[PIL.Image.Image]:    
     if isinstance(image_prompts, str):
@@ -139,44 +132,26 @@ def encode_image_prompt(image_prompts: List[PIL.Image.Image], device: torch.devi
     return image_features, mask
 
 
-def load_vae(device="cuda", dtype=torch.float16):
-    """
-    Load the DC-AE VAE decoder.
-    """
-    if not VAE_AVAILABLE:
-        return None
-
-    print("Loading DC-AE VAE decoder...")
-    vae = AutoencoderDC.from_pretrained(
-        "mit-han-lab/dc-ae-f32c32-sana-1.1-diffusers",
-        torch_dtype=dtype
-    ).to(device)
-    vae.eval()
-    print("VAE loaded successfully")
-    return vae
+# load_vae function is now imported from models.vae_utils
 
 
-def decode_latents(latents: torch.Tensor, vae=None, vae_scale_factor=0.41407) -> List[Image.Image]:
+def decode_latents(latents: torch.Tensor, vae=None, vae_name="AutoencoderDC") -> List[Image.Image]:
     """
     Decode latents to images using VAE or create visualization.
 
     Args:
         latents: Generated latents [B, C, H, W]
         vae: VAE decoder model
-        vae_scale_factor: Scaling factor for DC-AE (0.41407)
+        vae_name: Name of VAE type for decoding
 
     Returns:
         List of PIL images
     """
     if vae is not None:
-        # Decode with actual VAE
+        # Decode with actual VAE using vae_utils
         with torch.no_grad():
-            # Scale latents
-            latents = latents / vae_scale_factor
-            # Ensure latents have the same dtype as VAE
-            latents = latents.to(dtype=vae.dtype)
-            # Decode to images
-            images = vae.decode(latents).sample
+            # Decode latents to images
+            images = vae_decode(vae_name, vae, latents)
             # Convert to PIL images
             images = (images / 2 + 0.5).clamp(0, 1)
             images = images.cpu().permute(0, 2, 3, 1).numpy()
@@ -356,7 +331,7 @@ def generate_images(
     )
 
     # Decode latents to images
-    images = decode_latents(latents, vae=vae)
+    images = decode_latents(latents, vae=vae, vae_name="AutoencoderDC")
 
     return images
 
