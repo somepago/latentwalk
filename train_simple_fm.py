@@ -138,7 +138,7 @@ def plot_loss_curves(log_file_path, save_dir, plot_interval=100):
     print(f"Loss plots saved to: {plots_dir}")
 
 @torch.no_grad()
-def generate_sample_images(dit, dino_model, device, save_dir, iteration, num_samples=4, num_steps=50):
+def generate_sample_images(dit, dino_model, device, save_dir, iteration, num_samples=4, num_steps=50, in_channels=3):
     """
     Generate sample images using Euler sampling from the trained DiT.
     """
@@ -159,7 +159,7 @@ def generate_sample_images(dit, dino_model, device, save_dir, iteration, num_sam
     dino_features = dino_model(dino_images).to(dtype=torch.float32)
 
     # Euler sampling: start from noise, integrate velocity
-    x = torch.randn(num_samples, 3, 64, 64, device=device)
+    x = torch.randn(num_samples, in_channels, 64, 64, device=device)
     dt = 1.0 / num_steps
 
     # Capture snapshots for denoising trajectory (first sample only)
@@ -181,8 +181,10 @@ def generate_sample_images(dit, dino_model, device, save_dir, iteration, num_sam
     os.makedirs(os.path.join(save_dir, 'samples'), exist_ok=True)
     fig, axes = plt.subplots(2, num_samples, figsize=(num_samples * 3, 6))
 
+    imshow_kwargs = dict(cmap='gray') if in_channels == 1 else {}
+
     for i in range(num_samples):
-        # Original images
+        # Original images (always 3ch from dataset, show as-is)
         orig_img = sample_images[i].cpu().permute(1, 2, 0).numpy()
         orig_img = (orig_img + 1) / 2  # Denormalize from [-1,1] to [0,1]
         axes[0, i].imshow(orig_img)
@@ -190,9 +192,13 @@ def generate_sample_images(dit, dino_model, device, save_dir, iteration, num_sam
         axes[0, i].axis('off')
 
         # Generated images
-        gen_img = generated[i].cpu().permute(1, 2, 0).numpy()
+        gen_img = generated[i].cpu().numpy()
         gen_img = (gen_img + 1) / 2
-        axes[1, i].imshow(gen_img)
+        if in_channels == 1:
+            gen_img = gen_img[0]  # [H, W]
+        else:
+            gen_img = gen_img.transpose(1, 2, 0)  # [H, W, C]
+        axes[1, i].imshow(gen_img, **imshow_kwargs)
         axes[1, i].set_title(f'Generated {i}')
         axes[1, i].axis('off')
 
@@ -205,9 +211,13 @@ def generate_sample_images(dit, dino_model, device, save_dir, iteration, num_sam
     fig, axes = plt.subplots(1, n_snaps, figsize=(n_snaps * 2.5, 3))
     labels = ['t=1.0', 't=0.75', 't=0.50', 't=0.25', 't=0.0', 'final'][:n_snaps]
     for i, (snap, label) in enumerate(zip(trajectory_snapshots, labels)):
-        img = snap.permute(1, 2, 0).numpy()
+        img = snap.numpy()
         img = (img + 1) / 2
-        axes[i].imshow(img.clip(0, 1))
+        if in_channels == 1:
+            img = img[0]  # [H, W]
+        else:
+            img = img.transpose(1, 2, 0)  # [H, W, C]
+        axes[i].imshow(img.clip(0, 1), **imshow_kwargs)
         axes[i].set_title(label)
         axes[i].axis('off')
     plt.tight_layout()
@@ -234,6 +244,8 @@ def train(
     wandb_project="latentwalk",
     wandb_entity=None,
     run_name=None,
+    in_channels=3,
+    patch_size=16,
 ):
     """
     Train the DiT model on shape dataset with flow matching.
@@ -256,7 +268,7 @@ def train(
     dino_model = ModelWithIntermediateLayers().to(device)
     dino_model.eval()
 
-    dit = DiT(image_size=64, patch_size=16).to(device)
+    dit = DiT(image_size=64, patch_size=patch_size, in_channels=in_channels).to(device)
     total_params = sum(p.numel() for p in dit.parameters())
     print(f"DiT parameters: {total_params:,}")
 
@@ -298,6 +310,8 @@ def train(
             'num_epochs': num_epochs,
             'num_samples': num_samples,
             'gradient_accumulation_steps': gradient_accumulation_steps,
+            'in_channels': in_channels,
+            'patch_size': patch_size,
             'dit_params': total_params,
         },
     )
@@ -317,11 +331,16 @@ def train(
                 images = images.to(device)
 
                 # Get DINO embeddings (resize 64 -> 56 for ViT-S/14)
+                # DINO always needs 3-channel input
                 with torch.no_grad():
                     dino_images = torch.nn.functional.interpolate(
                         images, size=(56, 56), mode='bilinear', align_corners=False
                     )
                     dino_features = dino_model(dino_images).to(dtype=torch.float32)
+
+                # Slice channels for the model (dataset always outputs 3ch)
+                if in_channels == 1:
+                    images = images[:, :1]
 
                 # Flow matching
                 B = images.shape[0]
@@ -375,7 +394,7 @@ def train(
                     # Generate sample images
                     if iteration % sample_interval == 0:
                         print(f"\nGenerating sample images for iteration {iteration}...")
-                        generate_sample_images(dit, dino_model, device, save_dir, iteration)
+                        generate_sample_images(dit, dino_model, device, save_dir, iteration, in_channels=in_channels)
                         sample_path = os.path.join(save_dir, 'samples', f'iter_{iteration}_comparison.png')
                         traj_path = os.path.join(save_dir, 'samples', f'iter_{iteration}_trajectory.png')
                         sample_log = {}
@@ -403,7 +422,9 @@ def train(
                                 'learning_rate': learning_rate,
                                 'num_epochs': num_epochs,
                                 'num_samples': num_samples,
-                                'gradient_accumulation_steps': gradient_accumulation_steps
+                                'gradient_accumulation_steps': gradient_accumulation_steps,
+                                'in_channels': in_channels,
+                                'patch_size': patch_size,
                             }
                         }, checkpoint_path)
 
@@ -428,13 +449,15 @@ def train(
             'learning_rate': learning_rate,
             'num_epochs': num_epochs,
             'num_samples': num_samples,
-            'gradient_accumulation_steps': gradient_accumulation_steps
+            'gradient_accumulation_steps': gradient_accumulation_steps,
+            'in_channels': in_channels,
+            'patch_size': patch_size,
         }
     }, final_checkpoint_path)
 
     # Generate final sample images
     print("Generating final sample images...")
-    generate_sample_images(dit, dino_model, device, save_dir, 'final')
+    generate_sample_images(dit, dino_model, device, save_dir, 'final', in_channels=in_channels)
 
     # Generate final loss plots
     print("Generating final loss plots...")
@@ -462,6 +485,8 @@ if __name__ == "__main__":
     parser.add_argument('--resume', type=str, default=None, help='Path to checkpoint to resume from')
     parser.add_argument('--wandb-project', type=str, default='latentwalk')
     parser.add_argument('--wandb-entity', type=str, default=None)
+    parser.add_argument('--in-channels', type=int, default=3, help='Number of image channels (1 for grayscale, 3 for RGB)')
+    parser.add_argument('--patch-size', type=int, default=16, help='Patch size for DiT patchification')
 
     args = parser.parse_args()
     if args.run_name is not None:
@@ -483,4 +508,6 @@ if __name__ == "__main__":
         wandb_project=args.wandb_project,
         wandb_entity=args.wandb_entity,
         run_name=args.run_name,
+        in_channels=args.in_channels,
+        patch_size=args.patch_size,
     )
