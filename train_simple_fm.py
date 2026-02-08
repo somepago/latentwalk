@@ -3,7 +3,6 @@ Training pipeline for DiT flow matching on 32x32 shape images with DINO conditio
 """
 
 import torch
-import torch.nn as nn
 from torch.utils.data import DataLoader
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import LambdaLR
@@ -163,13 +162,20 @@ def generate_sample_images(dit, dino_model, device, save_dir, iteration, num_sam
     x = torch.randn(num_samples, 3, 64, 64, device=device)
     dt = 1.0 / num_steps
 
+    # Capture snapshots for denoising trajectory (first sample only)
+    trajectory_steps = [0, num_steps // 4, num_steps // 2, 3 * num_steps // 4]
+    trajectory_snapshots = [x[0].clamp(-1, 1).cpu()]
+
     for i in range(num_steps):
         t_val = 1.0 - i * dt  # go from t=1 (noise) to t=0 (clean)
         t = torch.full((num_samples,), t_val, device=device)
         v = dit(x, t, dino_features)
         x = x - v * dt  # velocity = noise - x_0, so we subtract to go toward x_0
+        if i + 1 in trajectory_steps:
+            trajectory_snapshots.append(x[0].clamp(-1, 1).cpu())
 
     generated = x.clamp(-1, 1)
+    trajectory_snapshots.append(generated[0].cpu())  # final result
 
     # Save comparison grid
     os.makedirs(os.path.join(save_dir, 'samples'), exist_ok=True)
@@ -192,6 +198,21 @@ def generate_sample_images(dit, dino_model, device, save_dir, iteration, num_sam
 
     plt.tight_layout()
     plt.savefig(os.path.join(save_dir, 'samples', f'iter_{iteration}_comparison.png'), dpi=150, bbox_inches='tight')
+    plt.close()
+
+    # Save denoising trajectory for first sample
+    n_snaps = len(trajectory_snapshots)
+    fig, axes = plt.subplots(1, n_snaps, figsize=(n_snaps * 2.5, 3))
+    labels = ['t=1.0', 't=0.75', 't=0.50', 't=0.25', 't=0.0', 'final'][:n_snaps]
+    for i, (snap, label) in enumerate(zip(trajectory_snapshots, labels)):
+        img = snap.permute(1, 2, 0).numpy()
+        img = (img + 1) / 2
+        axes[i].imshow(img.clip(0, 1))
+        axes[i].set_title(label)
+        axes[i].axis('off')
+    plt.tight_layout()
+    traj_path = os.path.join(save_dir, 'samples', f'iter_{iteration}_trajectory.png')
+    plt.savefig(traj_path, dpi=150, bbox_inches='tight')
     plt.close()
 
     print(f"Generated sample images for iteration {iteration}")
@@ -286,6 +307,7 @@ def train(
     for epoch in range(start_epoch, num_epochs):
         total_loss = 0
         num_batches = len(dataloader)
+        timestep_losses = [[] for _ in range(4)]  # 4 buckets: [0,.25), [.25,.5), [.5,.75), [.75,1)
 
         with tqdm(dataloader, desc=f"Epoch {epoch + 1}/{num_epochs}") as pbar:
             for batch_idx, (images, _) in enumerate(pbar):
@@ -309,13 +331,23 @@ def train(
                 pred = dit(x_t, t, dino_features)
 
                 # Loss
-                loss = nn.MSELoss()(pred, target)
+                per_sample_loss = ((pred - target) ** 2).mean(dim=(1, 2, 3))
+                loss = per_sample_loss.mean()
+
+                # Loss by timestep bucket
+                with torch.no_grad():
+                    for bucket_idx, (lo, hi) in enumerate([(0, 0.25), (0.25, 0.5), (0.5, 0.75), (0.75, 1.0)]):
+                        mask = (t >= lo) & (t < hi)
+                        if mask.any():
+                            timestep_losses[bucket_idx].append(per_sample_loss[mask].mean().item())
+
                 loss = loss / gradient_accumulation_steps
 
                 loss.backward()
 
                 # Update weights every gradient_accumulation_steps
                 if (batch_idx + 1) % gradient_accumulation_steps == 0:
+                    grad_norm = torch.nn.utils.clip_grad_norm_(dit.parameters(), max_norm=1.0)
                     optimizer.step()
                     optimizer.zero_grad()
 
@@ -324,19 +356,32 @@ def train(
                     iteration = epoch * (len(dataloader) // gradient_accumulation_steps) + (batch_idx // gradient_accumulation_steps) + 1
                     iter_loss = loss.item() * gradient_accumulation_steps
                     loss_logger.log_loss(iteration, epoch + 1, iter_loss)
-                    wandb.log({
+                    log_dict = {
                         'loss': iter_loss,
                         'lr': scheduler.get_last_lr()[0],
                         'epoch': epoch + 1,
-                    }, step=iteration)
+                        'grad_norm': grad_norm.item(),
+                    }
+                    bucket_names = ['loss_t0.00-0.25', 'loss_t0.25-0.50', 'loss_t0.50-0.75', 'loss_t0.75-1.00']
+                    for bi, name in enumerate(bucket_names):
+                        if timestep_losses[bi]:
+                            log_dict[name] = sum(timestep_losses[bi]) / len(timestep_losses[bi])
+                    timestep_losses = [[] for _ in range(4)]
+                    wandb.log(log_dict, step=iteration)
 
                     # Generate sample images
                     if iteration % sample_interval == 0:
                         print(f"\nGenerating sample images for iteration {iteration}...")
                         generate_sample_images(dit, dino_model, device, save_dir, iteration)
                         sample_path = os.path.join(save_dir, 'samples', f'iter_{iteration}_comparison.png')
+                        traj_path = os.path.join(save_dir, 'samples', f'iter_{iteration}_trajectory.png')
+                        sample_log = {}
                         if os.path.exists(sample_path):
-                            wandb.log({'samples': wandb.Image(sample_path)}, step=iteration)
+                            sample_log['samples'] = wandb.Image(sample_path)
+                        if os.path.exists(traj_path):
+                            sample_log['denoising_trajectory'] = wandb.Image(traj_path)
+                        if sample_log:
+                            wandb.log(sample_log, step=iteration)
 
                     # Save checkpoints
                     if iteration % save_interval == 0:
