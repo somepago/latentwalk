@@ -5,7 +5,7 @@ Training pipeline for DiT flow matching on 32x32 shape images with DINO conditio
 import torch
 from torch.utils.data import DataLoader
 from torch.optim import AdamW
-from torch.optim.lr_scheduler import LambdaLR
+from torch.optim.lr_scheduler import LinearLR, CosineAnnealingLR, SequentialLR
 from tqdm import tqdm
 import os
 import json
@@ -260,9 +260,12 @@ def train(
     total_params = sum(p.numel() for p in dit.parameters())
     print(f"DiT parameters: {total_params:,}")
 
-    # Optimizer and flat LR
+    # Optimizer with linear warmup (1 epoch) + cosine annealing
     optimizer = AdamW(dit.parameters(), lr=learning_rate)
-    scheduler = LambdaLR(optimizer, lr_lambda=lambda epoch: 1.0)
+    warmup_epochs = 1
+    warmup_scheduler = LinearLR(optimizer, start_factor=1e-3, total_iters=warmup_epochs)
+    cosine_scheduler = CosineAnnealingLR(optimizer, T_max=num_epochs - warmup_epochs)
+    scheduler = SequentialLR(optimizer, schedulers=[warmup_scheduler, cosine_scheduler], milestones=[warmup_epochs])
 
     # Resume from checkpoint
     start_epoch = 0
